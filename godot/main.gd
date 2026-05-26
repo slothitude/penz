@@ -18,6 +18,8 @@ extends Control
 var _point_count: int = 0
 var _hud_visible: bool = true
 var _page_just_saved: bool = false
+var _press_count: int = 0
+var _press_timer: Timer
 
 
 func _ready() -> void:
@@ -28,13 +30,15 @@ func _ready() -> void:
 	ble.stroke_end_received.connect(_on_stroke_end)
 	ble.status_updated.connect(_on_status)
 	ble.connection_progress.connect(_on_connection_progress)
-	ble.button_pressed.connect(_on_new_page)
+	ble.button_pressed.connect(_on_button_pressed)
+	ble.pages_synced.connect(_on_pages_synced)
 
 	# Wire UI signals
 	toolbar.connect_pressed.connect(_on_connect)
 	toolbar.new_page_pressed.connect(_on_new_page)
 	toolbar.sync_pressed.connect(_on_sync)
 	toolbar.ocr_pressed.connect(_on_ocr)
+	toolbar.font_pressed.connect(_on_font)
 	hud.gallery_pressed.connect(_show_gallery)
 	hud.settings_pressed.connect(_show_settings)
 
@@ -42,6 +46,14 @@ func _ready() -> void:
 	gallery.visible = false
 	settings_panel.visible = false
 	ocr_panel.visible = false
+	glyph_labeller.visible = false
+
+	# Button gesture timer
+	_press_timer = Timer.new()
+	_press_timer.one_shot = true
+	_press_timer.wait_time = 0.4
+	_press_timer.timeout.connect(_on_press_timeout)
+	add_child(_press_timer)
 
 	# Load saved UUID
 	settings_panel.uuid_loaded.connect(ble.set_uuid)
@@ -135,7 +147,51 @@ func _on_connection_progress(step: String) -> void:
 
 
 func _on_new_page() -> void:
+	# Called from toolbar "New" button — immediate save, no gesture delay
+	_press_timer.stop()
+	_press_count = 0
 	_page_just_saved = true
+	ink_canvas.save_current_page()
+	ink_canvas.clear()
+	_point_count = 0
+	toolbar.set_point_count(0)
+
+
+func _on_button_pressed() -> void:
+	# Called from BLE 0xCB — gesture detection
+	_press_count += 1
+	hud.show_message("Button x%d" % _press_count)
+	if _press_count == 1:
+		_press_timer.start()
+	elif _press_count >= 2:
+		_press_timer.stop()
+		_press_count = 0
+		_execute_double_press()
+
+
+func _on_press_timeout() -> void:
+	var presses := _press_count
+	_press_count = 0
+	if presses == 1:
+		_execute_single_press()
+
+
+func _execute_single_press() -> void:
+	hud.show_message("Saved")
+	_page_just_saved = true
+	ink_canvas.save_current_page()
+	ink_canvas.clear()
+	_point_count = 0
+	toolbar.set_point_count(0)
+
+
+func _execute_double_press() -> void:
+	hud.show_message("OCR + Save")
+	_page_just_saved = true
+	# Run OCR before clearing
+	var png_data: PackedByteArray = await ink_canvas.export_png()
+	if png_data.size() > 0:
+		ocr_panel.run_ocr(png_data)
 	ink_canvas.save_current_page()
 	ink_canvas.clear()
 	_point_count = 0
@@ -144,6 +200,12 @@ func _on_new_page() -> void:
 
 func _on_sync() -> void:
 	ble.sync_pages()
+
+
+func _on_pages_synced(page_paths: PackedStringArray) -> void:
+	if page_paths.size() > 0:
+		hud.show_message("Synced %d pages" % page_paths.size())
+		gallery.refresh()
 
 
 func _on_ocr() -> void:
@@ -159,3 +221,104 @@ func _show_gallery() -> void:
 
 func _show_settings() -> void:
 	settings_panel.visible = true
+
+
+# ── Font maker ──────────────────────────────────────────────────────
+
+var _segment_pid: int = -1
+var _segment_timer: Timer
+
+
+func _on_font() -> void:
+	if ink_canvas.get_store().is_empty():
+		hud.show_message("Draw glyphs first")
+		return
+	hud.show_message("Segmenting...")
+	var png_data: PackedByteArray = await ink_canvas.export_png()
+	if png_data.size() == 0:
+		hud.show_message("Export failed")
+		return
+
+	# Save PNG to temp file for fontmaker.py
+	var tmp_dir := ProjectSettings.globalize_path("user://tmp")
+	if not DirAccess.dir_exists_absolute(tmp_dir):
+		DirAccess.make_dir_recursive_absolute(tmp_dir)
+	var img_path := tmp_dir + "/font_input.png"
+	var f := FileAccess.open(img_path, FileAccess.WRITE)
+	if not f:
+		hud.show_message("Cannot write temp")
+		return
+	f.store_buffer(png_data)
+	f.close()
+
+	var outdir := tmp_dir + "/glyphs"
+	# Clean old glyphs
+	if DirAccess.dir_exists_absolute(outdir):
+		var da := DirAccess.open(outdir)
+		if da:
+			da.list_dir_begin()
+			var fn := da.get_next()
+			while fn != "":
+				if not da.current_is_dir():
+					da.remove(fn)
+				fn = da.get_next()
+
+	var script := ProjectSettings.globalize_path("res://fontmaker.py")
+	var args := PackedStringArray([
+		script, "segment",
+		"--input", img_path,
+		"--outdir", outdir
+	])
+
+	_segment_pid = OS.create_process("python", args)
+	if _segment_pid == -1:
+		hud.show_message("Cannot start fontmaker")
+		return
+
+	# Poll for completion
+	if _segment_timer:
+		_segment_timer.stop()
+	_segment_timer = Timer.new()
+	_segment_timer.wait_time = 0.2
+	_segment_timer.timeout.connect(_poll_segment.bind(outdir))
+	add_child(_segment_timer)
+	_segment_timer.start()
+
+
+func _poll_segment(outdir: String) -> void:
+	if _segment_pid != -1 and OS.is_process_running(_segment_pid):
+		return
+	_segment_timer.stop()
+	_segment_timer.queue_free()
+	_segment_timer = null
+
+	# Collect glyph PNGs
+	if not DirAccess.dir_exists_absolute(outdir):
+		hud.show_message("Segment failed")
+		_segment_pid = -1
+		return
+
+	var da := DirAccess.open(outdir)
+	if not da:
+		hud.show_message("Cannot read glyphs")
+		_segment_pid = -1
+		return
+
+	var paths: Array = []
+	da.list_dir_begin()
+	var fn := da.get_next()
+	while fn != "":
+		if fn.ends_with(".png"):
+			paths.append(outdir + "/" + fn)
+		fn = da.get_next()
+
+	if paths.is_empty():
+		hud.show_message("No glyphs found")
+		_segment_pid = -1
+		return
+
+	paths.sort()
+	glyph_labeller.load_glyphs(paths)
+	glyph_labeller.visible = true
+	hud.show_message("Found %d glyphs" % paths.size())
+	_segment_pid = -1

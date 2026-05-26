@@ -5,6 +5,7 @@ signal connect_pressed()
 signal new_page_pressed()
 signal sync_pressed()
 signal ocr_pressed()
+signal font_pressed()
 
 var _connect_btn: Button
 var _point_label: Label
@@ -37,6 +38,7 @@ func _ready() -> void:
 	add_child(_make_button("New", func(): new_page_pressed.emit()))
 	add_child(_make_button("Sync", func(): sync_pressed.emit()))
 	add_child(_make_button("OCR", func(): ocr_pressed.emit()))
+	add_child(_make_button("Font", func(): font_pressed.emit()))
 
 	# Thickness controls
 	add_child(_make_button("-", _thinner))

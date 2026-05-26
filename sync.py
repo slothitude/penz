@@ -406,7 +406,9 @@ class PageSyncer:
 class JsonPageSyncer(PageSyncer):
     """PageSyncer that emits JSON progress for Godot."""
 
-    async def run(self):
+    def __init__(self, output_dir=None):
+        super().__init__()
+        self.output_dir = output_dir or OUTPUT_DIR
         # Load UUID
         if not os.path.exists(UUID_FILE):
             _sync_out({"type": "error", "message": "No UUID file. Run register.py first."})
@@ -462,7 +464,7 @@ class JsonPageSyncer(PageSyncer):
                 _sync_out({"type": "sync_done", "pages": []})
                 return
 
-            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), OUTPUT_DIR)
+            output_dir = self.output_dir
             os.makedirs(output_dir, exist_ok=True)
             synced_pages = []
 
@@ -530,6 +532,16 @@ class JsonPageSyncer(PageSyncer):
 
                 out_path = os.path.join(output_dir, f"{ts_label}.svg")
                 canvas.save(out_path)
+
+                # Generate PNG thumbnail for gallery
+                thumb_path = os.path.join(output_dir, f"{ts_label}_thumb.png")
+                try:
+                    thumb = canvas.img.copy()
+                    thumb.thumbnail((432, 294))
+                    thumb.save(thumb_path)
+                except Exception:
+                    pass
+
                 synced_pages.append(out_path)
                 _sync_out({"type": "page_synced", "path": out_path, "strokes": len(strokes), "points": total_points})
 
@@ -545,6 +557,7 @@ if __name__ == "__main__":
     parser.add_argument("--keep", action="store_true", help="Don't delete pages from device after sync")
     parser.add_argument("--json-stdout", action="store_true", help="JSON output for Godot")
     parser.add_argument("--pipe", default=None, help="JSONL file for Godot IPC")
+    parser.add_argument("--output", default=None, help="Output directory for synced pages")
     args = parser.parse_args()
 
     if args.json_stdout:
@@ -554,7 +567,8 @@ if __name__ == "__main__":
                 os.makedirs(pipe_dir, exist_ok=True)
             _sync_pipe = open(args.pipe, "w", encoding="utf-8")
 
-        syncer = JsonPageSyncer()
+        output = args.output or OUTPUT_DIR
+        syncer = JsonPageSyncer(output_dir=output)
         try:
             asyncio.run(syncer.run())
         except (KeyboardInterrupt, asyncio.CancelledError):

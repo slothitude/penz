@@ -8,6 +8,7 @@ signal closed()
 var _grid: GridContainer
 var _glyphs: Array = []  # [{path, label_edit, texture_rect}]
 var _status_label: Label
+var _preview_label: Label
 var _busy: bool = false
 
 const BG_COLOR := Color(0.1, 0.1, 0.1, 0.98)
@@ -71,6 +72,15 @@ func _ready() -> void:
 	clear_btn.text = "Clear All Labels"
 	clear_btn.pressed.connect(_clear_labels)
 	actions.add_child(clear_btn)
+
+	# Font preview area
+	_preview_label = Label.new()
+	_preview_label.text = "The quick brown fox jumps over the lazy dog 0123456789"
+	_preview_label.add_theme_color_override("font_color", Color.WHITE)
+	_preview_label.add_theme_font_size_override("font_size", 20)
+	_preview_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_preview_label.custom_minimum_size = Vector2(0, 40)
+	vbox.add_child(_preview_label)
 
 
 func load_glyphs(glyph_paths: Array, ocr_hints: PackedStringArray = []) -> void:
@@ -170,6 +180,7 @@ func _wait_for_build(pid: int, output_path: String) -> void:
 	_busy = false
 	if FileAccess.file_exists(output_path):
 		_status_label.text = "Font built: " + output_path.get_file()
+		_load_font_preview(output_path)
 		font_built.emit(output_path)
 	else:
 		_status_label.text = "Build failed — check console"
@@ -178,3 +189,12 @@ func _wait_for_build(pid: int, output_path: String) -> void:
 func _clear_labels() -> void:
 	for g in _glyphs:
 		g["label_edit"].text = ""
+
+
+func _load_font_preview(font_path: String) -> void:
+	var font := FontFile.new()
+	if font.load_dynamic_font(font_path) == OK:
+		_preview_label.add_theme_font_override("font", font)
+		_preview_label.add_theme_color_override("font_color", ACCENT)
+	else:
+		_preview_label.text = "(Preview unavailable)"

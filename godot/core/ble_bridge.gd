@@ -110,7 +110,14 @@ func _sync_windows() -> void:
 		DirAccess.remove_absolute(sync_pipe)
 
 	var script_path := ProjectSettings.globalize_path("res://../sync.py")
-	var args := PackedStringArray(["-u", script_path, "--json-stdout", "--pipe", sync_pipe])
+	var pages_dir := ProjectSettings.globalize_path("user://pages/")
+	if not DirAccess.dir_exists_absolute(pages_dir):
+		DirAccess.make_dir_recursive_absolute(pages_dir)
+	var args := PackedStringArray([
+		"-u", script_path, "--json-stdout",
+		"--pipe", sync_pipe,
+		"--output", pages_dir
+	])
 
 	_sync_process_id = OS.create_process("python", args)
 	if _sync_process_id == -1:

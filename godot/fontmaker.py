@@ -92,20 +92,11 @@ def segment(input_path: str, outdir: str) -> None:
 
 
 def build(glyphs_dir: str, labels: list[str], output_path: str) -> None:
-    """Build TTF from labelled glyph PNGs using potrace + fonttools."""
-    from fontTools.ttLib import TTFont
-    from fontTools.pens.t2Pen import T2Pen
-    from fontTools.pens.recordingPen import RecordingPen
+    """Build TTF from labelled glyph PNGs using Bézier tracing + fonttools."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.ttLib.tables._g_l_y_f import Glyph
 
-    # Create a basic TTF
-    font = TTFont()
-    font.setGlyphOrder([".notdef"] + labels)
-
-    cmap = font.newTable("cmap")
-    cmap.tableVersion = 0
-    subtable = font["cmap"] = cmap
-
-    # For each glyph, trace PNG → SVG paths via potrace → add to font
     glyph_files = sorted([f for f in os.listdir(glyphs_dir) if f.endswith(".png")])
 
     if len(glyph_files) != len(labels):
@@ -115,77 +106,108 @@ def build(glyphs_dir: str, labels: list[str], output_path: str) -> None:
         })
         return
 
-    # Create glyph outlines
-    from fontTools.fontBuilder import FontBuilder
-    fb = FontBuilder(1000, isTTF=True)
-    fb.setupGlyphOrder([".notdef"] + labels)
-    fb.setupCharacterMap({ord(c): c for c in labels if len(c) == 1})
-
-    # Setup basic tables
-    fb.setupGlyf({".notdef": {"numberOfContours": 0}})
-
-    # Trace each glyph
-    glyf_table = {}
+    # Trace each glyph into a Glyph object via TTGlyphPen
+    glyph_table = {}
+    widths = {}
     for i, (glyph_file, label) in enumerate(zip(glyph_files, labels)):
         glyph_path = os.path.join(glyphs_dir, glyph_file)
         contours = _trace_glyph(glyph_path)
-        if contours:
-            glyf_table[label] = _contours_to_glyph(contours)
-        else:
-            glyf_table[label] = {"numberOfContours": 0}
+        glyph_table[label] = _draw_glyph(contours)
+        widths[label] = 500
 
         _json_out({"type": "progress", "step": f"Tracing glyph {i + 1}/{len(glyph_files)}"})
 
-    fb.setupGlyf(glyf_table)
-    fb.setupHorizontalMetrics({g: (500, 50) for g in [".notdef"] + labels})
+    # Empty .notdef glyph
+    glyph_table[".notdef"] = Glyph()
+    widths[".notdef"] = 500
+
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef"] + labels)
+    fb.setupCharacterMap({ord(c): c for c in labels if len(c) == 1})
+    fb.setupGlyf(glyph_table, calcGlyphBounds=True, validateGlyphFormat=False)
+    fb.setupHorizontalMetrics({g: (widths[g], 50) for g in [".notdef"] + labels})
     fb.setupHorizontalHeader()
     fb.setupNameTable({"familyName": "PenzHandwriting", "styleName": "Regular"})
-    fb.setupOs2()
+    fb.setupOS2()
     fb.setupPost()
 
-    font = fb.font
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    font.save(output_path)
-
+    fb.font.save(output_path)
     _json_out({"type": "built", "path": output_path})
 
 
 def _trace_glyph(png_path: str) -> list:
-    """Trace a glyph PNG to contours using potrace CLI."""
-    # Read and threshold
+    """Trace a glyph PNG to smooth quadratic Bézier contours."""
     img = cv2.imread(png_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         return []
 
     _, binary = cv2.threshold(img, 128, 255, cv2.THRESH_BINARY_INV)
-
-    # Find contours
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Convert to normalized coordinates (0-1000 for font units)
     h, w = binary.shape
+
+    # Find contours with full point storage
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)
+
     result = []
     for contour in contours:
+        # Simplify with approxPolyDP for fewer, smoother control points
+        epsilon = cv2.arcLength(contour, True) * 0.02
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+
+        if len(approx) < 3:
+            continue
+
+        # Scale to 1000-unit font space with margins
         points = []
-        for pt in contour[0]:
-            # Scale to 1000-unit font space
-            fx = int(pt[0] / w * 800) + 100  # 100 unit left margin
-            fy = int((h - pt[1]) / h * 800) + 100  # flip Y, bottom margin
+        for pt in approx:
+            fx = int(pt[0][0] / w * 800) + 100
+            fy = int((h - pt[0][1]) / h * 800) + 100
             points.append((fx, fy))
-        if len(points) >= 3:
-            result.append(points)
+
+        result.append(points)
 
     return result
 
 
-def _contours_to_glyph(contours: list) -> dict:
-    """Convert contour point lists to fontTools glyph dict."""
-    # Simple polygon contours for TTF
-    return {
-        "numberOfContours": len(contours),
-        "coordinates": contours,
-        "flags": [[1] * len(c) for c in contours],
-    }
+def _draw_glyph(contours: list) -> "Glyph":
+    """Draw smooth quadratic Bézier contours into a Glyph via TTGlyphPen.
+
+    Converts polygon vertices to smooth curves by inserting midpoints
+    as on-curve anchors, keeping original vertices as off-curve controls.
+    """
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.ttLib.tables._g_l_y_f import Glyph
+
+    if not contours:
+        return Glyph()
+
+    pen = TTGlyphPen(None)
+
+    for contour in contours:
+        n = len(contour)
+        if n < 3:
+            continue
+
+        # Start at midpoint between last and first vertex
+        mid_start = (
+            (contour[-1][0] + contour[0][0]) // 2,
+            (contour[-1][1] + contour[0][1]) // 2,
+        )
+        pen.moveTo(mid_start)
+
+        for i in range(n):
+            # Off-curve control point (original vertex)
+            # On-curve midpoint to next vertex
+            next_i = (i + 1) % n
+            mid = (
+                (contour[i][0] + contour[next_i][0]) // 2,
+                (contour[i][1] + contour[next_i][1]) // 2,
+            )
+            pen.qCurveTo(contour[i], mid)
+
+        pen.closePath()
+
+    return pen.glyph()
 
 
 def main():

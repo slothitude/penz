@@ -9,6 +9,8 @@ var _status_dot: ColorRect
 var _battery_label: Label
 var _mode_label: Label
 var _bg_panel: Panel
+var _message_label: Label
+var _message_timer: Timer
 
 const FONT_COLOR := Color(0.7, 0.7, 0.7)
 const ACCENT := Color(0.3, 0.8, 0.4)
@@ -71,6 +73,18 @@ func _ready() -> void:
 	pad.custom_minimum_size = Vector2(8, 0)
 	add_child(pad)
 
+	# Message label (auto-fades)
+	_message_label = Label.new()
+	_message_label.add_theme_color_override("font_color", ACCENT)
+	_message_label.add_theme_font_size_override("font_size", 15)
+	_message_label.text = ""
+	add_child(_message_label)
+	_message_timer = Timer.new()
+	_message_timer.one_shot = true
+	_message_timer.wait_time = 2.0
+	_message_timer.timeout.connect(func(): _message_label.text = "")
+	add_child(_message_timer)
+
 
 func set_battery(percent: int) -> void:
 	if percent < 0:
@@ -112,3 +126,8 @@ func _make_icon_button(text: String, callback: Callable) -> Button:
 	btn.custom_minimum_size = Vector2(64, 36)
 	btn.pressed.connect(callback)
 	return btn
+
+
+func show_message(text: String) -> void:
+	_message_label.text = text
+	_message_timer.start()
