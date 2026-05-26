@@ -1,17 +1,110 @@
 # Penz
 
-**Reverse-engineered BLE tools for the Wacom Bamboo Slate smartpad.** Real-time pen capture, stored page sync, handwriting OCR, and a cross-platform Godot app — all built from scratch by sniffing the protocol nobody was supposed to see.
+**Open-source BLE capture, real-time drawing, OCR, and font creation for the Wacom Bamboo Slate smartpad.**
 
----
+[![Godot 4.6](https://img.shields.io/badge/Godot-4.6-blue)](https://godotengine.org)
+[![Python 3.13](https://img.shields.io/badge/Python-3.13-green)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## What This Does
+<p align="center">
+  <img src="godot/screenshot.png" width="300" alt="Penz app showing paper canvas with dark chrome HUD and toolbar">
+</p>
 
-- **Live capture** — Connect to the Slate over BLE and stream pen strokes in real time (x, y, pressure at 200+ Hz)
-- **Page sync** — Download stored pages from the device's onboard memory, parse the proprietary binary stroke format
-- **Godot app** — Native UI for Windows and Android with live drawing, gallery, OCR, and font making
+Penz connects to a Wacom Bamboo Slate over Bluetooth Low Energy, streams pen strokes in real-time (x, y, pressure at 200+ Hz), and renders them in a native Godot app. It also downloads stored pages from the device, transcribes handwriting via local AI, and builds custom TTF fonts from handwritten glyphs.
+
+Everything below was reverse-engineered from scratch — no SDK, no documentation, no public API.
+
+## Features
+
+- **Live capture** — Stream pen strokes from the Slate in real time, rendered instantly on a warm paper canvas
+- **Stored page sync** — Download pages from the device's onboard memory, parse the proprietary binary stroke format
+- **Cross-platform app** — Native Godot UI for Windows and Android with live drawing, gallery, and settings
+- **Handwriting OCR** — Draw text, press a button, get transcription via local vision AI (Ollama)
+- **Font maker** — Segment handwritten glyphs, label them, export a TTF font
 - **Web server** — FastAPI backend with live canvas preview and device control
-- **OCR** — Draw handwriting, press a button, get text via local AI (Ollama minicpm-v)
-- **Font maker** — Segment handwritten glyphs → label them → export a TTF font
+- **Hardware button** — Single press saves, double press runs OCR + save
+
+## Comparison with [Tuhi](https://github.com/tuhiproject/tuhi)
+
+[Tuhi](https://github.com/tuhiproject/tuhi) (166 stars) is the only other open-source Wacom smartpad tool. Both projects independently reverse-engineered the same BLE protocol. Key differences:
+
+| | **Penz** | **Tuhi** |
+|---|---|---|
+| Live stroke capture with real-time canvas | Yes | No (routes through Linux uhid) |
+| Stored page download | Yes | Yes |
+| Cross-platform | Windows + Android | Linux only |
+| OCR / transcription | Yes (local vision model) | No |
+| Font creation | Yes (glyph segmentation + TTF) | No |
+| GUI framework | Godot 4.6 (native) | GTK (Python) |
+| Coordinate transform | 90-degree rotation for portrait use | None |
+| Pressure-sensitive rendering | Yes | No |
+
+## Quick Start
+
+### Prerequisites
+
+- A **Wacom Bamboo Slate** paired via Bluetooth
+- **Python 3.13+** with bleak, winrt, fastapi, uvicorn, Pillow, aiohttp
+- **Godot 4.6** for the native app
+- **Ollama** with a vision model for OCR (optional)
+- **OpenCV + fonttools** for font maker (optional)
+
+### Install
+
+```bash
+git clone https://github.com/slothitude/penz.git
+cd penz
+pip install -r requirements.txt
+```
+
+### Register Your Device (first time only)
+
+```bash
+python register.py                 # requires physical button press on Slate
+```
+
+### Live Capture
+
+```bash
+python capture.py                  # saves to data/live_capture.svg
+python capture.py --save out.svg --api http://localhost:8000
+```
+
+### Sync Stored Pages
+
+```bash
+python sync.py                     # downloads to data/pages/, deletes from device
+python sync.py --keep              # download without deleting
+```
+
+### Web Server
+
+```bash
+python server.py                   # http://localhost:8000
+```
+
+### Godot App
+
+```bash
+godot godot/project.godot          # open in Godot 4.6 editor
+```
+
+Connect → draw on paper → strokes appear on screen in real time.
+
+### OCR Setup
+
+```bash
+ollama pull minicpm-v              # pull the vision model (5.5 GB)
+```
+
+Draw handwriting on the Slate, press the OCR button (or double-press the hardware button), text appears in ~30 seconds. No cloud, no API keys — everything runs locally.
+
+### Font Maker
+
+```bash
+python godot/fontmaker.py segment --input handwriting.png --outdir glyphs/
+python godot/fontmaker.py build --glyphs glyphs/ --labels A,B,C,D --output my_font.ttf
+```
 
 ---
 
@@ -68,7 +161,7 @@ On Windows, a paired but sleeping Slate can't be woken by `bleak` (the standard 
 | `0xB9` | GetBattery | TX → device | Query battery level |
 | `0xA1` | PenData | device → client | 6-byte triplets: x, y, pressure (u16 LE) |
 | `0xA2` | Proximity | device → client | Pen entered/left proximity |
-| `0xCB` | ButtonPress | device → client | Physical button pressed (new page) |
+| `0xCB` | ButtonPress | device → client | Physical button pressed |
 | `0xC1` | GetFileCount | TX → device | Request number of stored pages |
 | `0xC2` | FileCount | device → RX | Response: count as u16 LE |
 | `0xC3` | StartDownload | TX → device | Begin downloading a stored page |
@@ -88,8 +181,8 @@ First time (registration):
 
 Every subsequent connection:
   Client → [0xE6, 0x06, <uuid>]     # Check authentication
-  Device → [0x50, ...]              # Authenticated ✓
-  Device → [0xB0, 0x01, 0x07]       # Error 7 = wrong UUID ✗
+  Device → [0x50, ...]              # Authenticated
+  Device → [0xB0, 0x01, 0x07]       # Error 7 = wrong UUID
 ```
 
 Error codes: `0` = success, `1` = general, `2` = invalid state, `5` = unrecognized command, `6` = needs button press, `7` = auth error.
@@ -140,137 +233,71 @@ Pages are stored in Wacom's proprietary binary stroke format:
 
 ```
 Wacom Slate (BLE)
-      │
-      ├─ live stream ──→ capture.py ──→ InkCanvas (SVG/PNG)
-      │                              └─ HTTP POST → server.py → Web UI
-      │                              └─ JSON stdout → Godot app
-      │
-      └─ stored pages ──→ sync.py ──→ binary parser → SVG
-                                       └─ JSON stdout → Godot app
+      |
+      +-- live stream ---> capture.py ---> InkCanvas (SVG/PNG)
+      |                                  +-- HTTP POST --> server.py --> Web UI
+      |                                  +-- JSON stdout --> Godot app
+      |
+      +-- stored pages --> sync.py ---> binary parser --> SVG
+                                          +-- JSON stdout --> Godot app
 
 Godot App (Windows)
-  capture.py --json-stdout → pipe file → ble_bridge.gd polls at 60fps
+  capture.py --json-stdout --> pipe file --> ble_bridge.gd polls at 60fps
 
 Godot App (Android)
-  Kotlin BLE plugin → direct BluetoothGatt → Godot signals
+  Kotlin BLE plugin --> direct BluetoothGatt --> Godot signals
 ```
-
----
-
-## Quick Start
-
-### Install
-
-```bash
-pip install -r requirements.txt    # bleak, winrt, fastapi, uvicorn, Pillow, aiohttp
-```
-
-### Register (first time only)
-
-```bash
-python register.py                 # requires physical button press on Slate
-```
-
-### Live Capture
-
-```bash
-python capture.py                  # saves to data/live_capture.svg
-python capture.py --save out.svg --api http://localhost:8000
-```
-
-### Sync Stored Pages
-
-```bash
-python sync.py                     # downloads to data/pages/, deletes from device
-python sync.py --keep              # download without deleting
-```
-
-### Web Server
-
-```bash
-python server.py                   # http://localhost:8000
-```
-
-### Godot App
-
-```bash
-godot godot/project.godot          # open in Godot 4.6 editor
-```
-
----
-
-## OCR
-
-Draw handwriting on the Slate → press the OCR button → text appears in ~30 seconds.
-
-Uses [Ollama](https://ollama.ai) with the `minicpm-v` vision model running locally. No cloud, no API keys. The canvas is exported as PNG, resized to 800px wide, base64 encoded, and sent to `localhost:11434/api/generate`.
-
-```bash
-ollama pull minicpm-v              # pull the model (5.5 GB)
-```
-
----
-
-## Font Maker
-
-Draw individual letters on the canvas → segment them automatically → label each glyph → export a TTF font.
-
-```bash
-python godot/fontmaker.py segment --input handwriting.png --outdir glyphs/
-python godot/fontmaker.py build --glyphs glyphs/ --labels A,B,C,D --output my_font.ttf
-```
-
-Segmentation uses OpenCV: Otsu threshold → morphological cleanup → contour detection → sorted left-to-right, top-to-bottom. Font build uses fonttools FontBuilder with 1000-unit EM squares.
-
----
 
 ## Project Layout
 
 ```
 penz/
-├── capture.py          # Real-time BLE capture (WinRT), multi-path mode switch
-├── sync.py             # Stored page download (bleak), binary stroke parser
-├── register.py         # One-time device registration
-├── scanner.py          # BLE discovery + GATT enumeration
-├── canvas.py           # PIL rasterization + SVG generation
-├── listen.py           # Debug listener for all BLE notifications
-├── server.py           # FastAPI backend with live preview
-├── godot/
-│   ├── main.gd         # Bootstrap — wires BLE + canvas + UI
-│   ├── canvas/
-│   │   ├── ink_canvas.gd        # Live drawing surface (Line2D nodes)
-│   │   ├── stroke_store.gd      # Stroke data + SVG export
-│   │   └── canvas_transform.gd  # 21600x14700 → screen coordinates (90° rotated)
-│   ├── core/
-│   │   ├── ble_bridge.gd        # Platform BLE dispatch (Windows/Android)
-│   │   └── protocol.gd          # Protocol constants
-│   ├── ui/
-│   │   ├── ocr_panel.gd         # Ollama OCR integration
-│   │   ├── gallery.gd           # Page gallery (view, delete, merge)
-│   │   └── glyph_labeller.gd    # Font maker UI
-│   ├── fontmaker.py             # OpenCV segmentation + fonttools TTF build
-│   └── android/plugin/          # Kotlin BLE plugin (full protocol in Kotlin)
-└── PLAN.md             # Roadmap
++-- capture.py            # Real-time BLE capture (WinRT), multi-path mode switch
++-- sync.py               # Stored page download (bleak), binary stroke parser
++-- register.py           # One-time device registration
++-- scanner.py            # BLE discovery + GATT enumeration
++-- canvas.py             # PIL rasterization + SVG generation
++-- listen.py             # Debug listener for all BLE notifications
++-- server.py             # FastAPI backend with live preview
++-- fontmaker.py          # OpenCV glyph segmentation + fonttools TTF build
++-- godot/
+|   +-- main.gd           # Bootstrap -- wires BLE + canvas + UI
+|   +-- main.tscn         # Scene tree (CanvasLayer overlay architecture)
+|   +-- canvas/
+|   |   +-- ink_canvas.gd       # Live drawing surface (Line2D nodes)
+|   |   +-- stroke_store.gd     # Stroke data + SVG export
+|   |   +-- stroke_renderer.gd  # Pressure-sensitive line rendering
+|   |   +-- dot_grid.gd         # Subtle paper dot grid background
+|   |   +-- canvas_transform.gd # 21600x14700 -> screen (90-degree rotation)
+|   +-- core/
+|   |   +-- ble_bridge.gd       # Platform BLE dispatch (Windows/Android)
+|   +-- ui/
+|   |   +-- theme.gd            # Design system -- palette, spacing, factories
+|   |   +-- hud.gd              # Top bar -- LED, battery, mode, toast
+|   |   +-- toolbar.gd          # Bottom bar -- connect, sync, OCR, font, thickness
+|   |   +-- connect_dialog.gd   # Animated BLE connection progress
+|   |   +-- ocr_panel.gd        # Ollama OCR integration
+|   |   +-- gallery.gd          # Page gallery (paper cards, viewer)
+|   |   +-- glyph_labeller.gd   # Font maker UI
+|   |   +-- settings_panel.gd   # UUID config + settings
+|   +-- fontmaker.py            # Python subprocess for glyph segmentation
+|   +-- android/plugin/         # Kotlin BLE plugin (full Wacom protocol)
+|   +-- screenshot.png          # App screenshot
 ```
-
----
 
 ## Requirements
 
-- **Python 3.13+** with `bleak`, `winrt`, `fastapi`, `uvicorn`, `Pillow`, `aiohttp`
+- **Python 3.13+** with bleak, winrt, fastapi, uvicorn, Pillow, aiohttp
 - **Godot 4.6** for the native app
-- **Ollama** with `minicpm-v` model for OCR
-- **OpenCV** + **fonttools** for font maker
+- **Ollama** with a vision model (e.g. `minicpm-v`) for OCR
+- **OpenCV + fonttools** for font maker
 - **Windows** for WinRT BLE (the only platform with reliable BLE + this device)
 - A **Wacom Bamboo Slate** paired via Bluetooth
 
----
+## Related Projects
 
-## Why "Penz"
-
-Because it captures pen strokes. Also, the Slate's button press opcode is `0xCB` and that's just funny.
-
----
+- **[Tuhi](https://github.com/tuhiproject/tuhi)** — GTK app for Wacom smartpad stored page download (Linux, Python/GTK)
+- **[Wacom Inkspace (decompiled)](https://github.com/elliotberry/wacom-inkspace)** — Decompiled official app, useful for protocol reference
 
 ## License
 
