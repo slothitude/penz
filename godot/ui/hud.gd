@@ -1,71 +1,71 @@
 extends HBoxContainer
-## Top HUD bar — floating overlay with gradient background.
+## Top HUD bar — premium paper-computer aesthetic.
 ## Part of CanvasLayer — draws over the ink canvas.
 
 signal gallery_pressed()
 signal settings_pressed()
 signal hw_button_pressed()
 
-var _status_dot: ColorRect
-var _battery_label: Label
-var _mode_label: Label
-var _bg_panel: Panel
+const PenzTheme = preload("res://ui/theme.gd")
+
+const S := PenzTheme.UI_SCALE
+const BAR_H := 48.0 * S
+
+var _hw_button: Control
+var _hw_pressed := false
 var _message_label: Label
 var _message_timer: Timer
-var _hw_button: Button
-var _hw_flash_timer: Timer
-
-const FONT_COLOR := Color(0.7, 0.7, 0.7)
-const ACCENT := Color(0.3, 0.8, 0.4)
-const BG_COLOR := Color(0.08, 0.08, 0.08, 0.85)
+var _battery_control: Control
+var _battery_percent: int = -1
+var _mode_label: Label
+var _led_control: Control
+var _glow_alpha: float = 0.0
+var _glow_tween: Tween
+var _connected := false
+var _toast_label: Label
+var _toast_tween: Tween
 
 
 func _ready() -> void:
-	# Semi-transparent gradient background
-	_bg_panel = Panel.new()
-	_bg_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	var bg := StyleBoxFlat.new()
-	bg.bg_color = BG_COLOR
-	bg.set_corner_radius_all(0)
-	_bg_panel.add_theme_stylebox_override("panel", bg)
-	add_child(_bg_panel)
+	# Background — ColorRect in the CanvasLayer (not child of HBoxContainer)
+	# because _draw() clips to the HBoxContainer's actual rect which is too small.
+	var bg := ColorRect.new()
+	bg.color = PenzTheme.CHROME_BG
+	bg.z_index = -1
+	bg.name = "HUBBg"
+	get_parent().call_deferred("add_child", bg)
+	# Deferred sizing after viewport is ready
+	_set_bg.call_deferred(bg)
 
-	# Status LED dot
-	_status_dot = ColorRect.new()
-	_status_dot.custom_minimum_size = Vector2(10, 10)
-	_status_dot.color = Color.GRAY
-	add_child(_status_dot)
+	# Status LED — custom drawn
+	_led_control = Control.new()
+	_led_control.custom_minimum_size = Vector2(16 * S, 16 * S)
+	_led_control.z_index = 1
+	_led_control.draw.connect(_draw_led)
+	add_child(_led_control)
 
-	# Title
+	# Title — lowercase, quiet
 	var title := Label.new()
-	title.text = "  Penz"
-	title.add_theme_color_override("font_color", Color.WHITE)
-	title.add_theme_font_size_override("font_size", 18)
+	title.text = "  penz"
+	title.add_theme_color_override("font_color", PenzTheme.TEXT_TERTIARY)
+	title.add_theme_font_size_override("font_size", int(16 * S))
 	add_child(title)
 
-	# Hardware button (mirrors Slate physical button)
-	_hw_button = Button.new()
-	_hw_button.text = "BTN"
-	var btn_style := StyleBoxFlat.new()
-	btn_style.bg_color = Color(0.25, 0.25, 0.25)
-	btn_style.set_corner_radius_all(6)
-	_hw_button.add_theme_stylebox_override("normal", btn_style)
-	var btn_hover := StyleBoxFlat.new()
-	btn_hover.bg_color = Color(0.35, 0.35, 0.35)
-	btn_hover.set_corner_radius_all(6)
-	_hw_button.add_theme_stylebox_override("hover", btn_hover)
-	_hw_button.add_theme_color_override("font_color", Color.WHITE)
-	_hw_button.add_theme_font_size_override("font_size", 13)
-	_hw_button.custom_minimum_size = Vector2(48, 32)
-	_hw_button.pressed.connect(func(): hw_button_pressed.emit())
+	# Hardware button — drawn circle outline
+	_hw_button = Control.new()
+	_hw_button.custom_minimum_size = Vector2(36 * S, 36 * S)
+	_hw_button.z_index = 1
+	_hw_button.draw.connect(_draw_hw_button)
+	_hw_button.gui_input.connect(_on_hw_input)
 	add_child(_hw_button)
 
 	# Flash timer for button animation
-	_hw_flash_timer = Timer.new()
-	_hw_flash_timer.one_shot = true
-	_hw_flash_timer.wait_time = 0.3
-	_hw_flash_timer.timeout.connect(_on_flash_end)
-	add_child(_hw_flash_timer)
+	var flash_timer := Timer.new()
+	flash_timer.one_shot = true
+	flash_timer.wait_time = 0.3
+	flash_timer.timeout.connect(_on_flash_end)
+	flash_timer.name = "FlashTimer"
+	add_child(flash_timer)
 
 	# Spacer
 	var spacer := Control.new()
@@ -74,96 +74,171 @@ func _ready() -> void:
 
 	# Mode label
 	_mode_label = Label.new()
-	_mode_label.add_theme_color_override("font_color", FONT_COLOR)
-	_mode_label.add_theme_font_size_override("font_size", 13)
+	_mode_label.add_theme_color_override("font_color", PenzTheme.TEXT_SECONDARY)
+	_mode_label.add_theme_font_size_override("font_size", int(12 * S))
 	_mode_label.text = ""
 	add_child(_mode_label)
 
-	# Battery label
-	_battery_label = Label.new()
-	_battery_label.add_theme_color_override("font_color", FONT_COLOR)
-	_battery_label.add_theme_font_size_override("font_size", 13)
-	_battery_label.text = ""
-	add_child(_battery_label)
+	# Battery — custom drawn
+	_battery_control = Control.new()
+	_battery_control.custom_minimum_size = Vector2(48 * S, 20 * S)
+	_battery_control.z_index = 1
+	_battery_control.draw.connect(_draw_battery)
+	add_child(_battery_control)
+
+	# Small spacer
+	var sep := Control.new()
+	sep.custom_minimum_size = Vector2(4 * S, 0)
+	add_child(sep)
 
 	# Gallery button
-	var gallery_btn := _make_icon_button("Gallery", func(): gallery_pressed.emit())
-	add_child(gallery_btn)
+	add_child(PenzTheme.make_icon_button(PenzTheme.ICON_GALLERY, func(): gallery_pressed.emit()))
 
 	# Settings button
-	var settings_btn := _make_icon_button("Settings", func(): settings_pressed.emit())
-	add_child(settings_btn)
+	add_child(PenzTheme.make_icon_button(PenzTheme.ICON_SETTINGS, func(): settings_pressed.emit()))
 
 	# Padding
 	var pad := Control.new()
-	pad.custom_minimum_size = Vector2(8, 0)
+	pad.custom_minimum_size = Vector2(8 * S, 0)
 	add_child(pad)
 
-	# Message label (auto-fades)
+	# Toast label — floating, auto-fades
+	_toast_label = Label.new()
+	_toast_label.add_theme_color_override("font_color", PenzTheme.ACCENT_LITE)
+	_toast_label.add_theme_font_size_override("font_size", int(14 * S))
+	_toast_label.text = ""
+	_toast_label.visible = false
+	_toast_label.z_index = 10
+	add_child(_toast_label)
+
+	# Legacy message label (kept for compat with main.gd show_message calls)
 	_message_label = Label.new()
-	_message_label.add_theme_color_override("font_color", ACCENT)
-	_message_label.add_theme_font_size_override("font_size", 15)
+	_message_label.add_theme_color_override("font_color", PenzTheme.ACCENT_LITE)
+	_message_label.add_theme_font_size_override("font_size", int(14 * S))
 	_message_label.text = ""
+	_message_label.visible = false
 	add_child(_message_label)
 	_message_timer = Timer.new()
 	_message_timer.one_shot = true
 	_message_timer.wait_time = 2.0
-	_message_timer.timeout.connect(func(): _message_label.text = "")
+	_message_timer.timeout.connect(func(): _message_label.visible = false)
 	add_child(_message_timer)
 
 
-func set_battery(percent: int) -> void:
-	if percent < 0:
-		_battery_label.text = ""
+func _set_bg(bg: ColorRect) -> void:
+	var vp_size := get_viewport().get_visible_rect().size
+	bg.position = Vector2.ZERO
+	bg.size = Vector2(vp_size.x, BAR_H)
+
+
+func _draw_led() -> void:
+	var center := Vector2(8 * S, 8 * S)
+	var base_color := PenzTheme.TEXT_TERTIARY
+	if _connected:
+		base_color = PenzTheme.ACCENT
+	if _glow_alpha > 0:
+		_led_control.draw_circle(center, 10 * S, Color(base_color.r, base_color.g, base_color.b, _glow_alpha * 0.3))
+	_led_control.draw_circle(center, 4 * S, base_color)
+	_led_control.draw_circle(center, 2 * S, Color(base_color.r + 0.2, base_color.g + 0.2, base_color.b + 0.2, 0.8))
+
+
+func _draw_hw_button() -> void:
+	var center := Vector2(18 * S, 18 * S)
+	var btn_color := PenzTheme.TEXT_TERTIARY
+	if _hw_pressed:
+		btn_color = PenzTheme.ACCENT
+	_hw_button.draw_arc(center, 12 * S, 0, TAU, 24, btn_color, 1.5 * S, true)
+	if _hw_pressed:
+		_hw_button.draw_circle(center, 4 * S, PenzTheme.ACCENT)
+
+
+func _draw_battery() -> void:
+	if _battery_percent < 0:
 		return
-	_battery_label.text = "%d%%  " % percent
-	if percent < 20:
-		_battery_label.add_theme_color_override("font_color", Color(0.9, 0.3, 0.3))
-	elif percent < 50:
-		_battery_label.add_theme_color_override("font_color", Color(0.9, 0.8, 0.3))
-	else:
-		_battery_label.add_theme_color_override("font_color", FONT_COLOR)
+	var bx := 2.0 * S
+	var by := 4.0 * S
+	_battery_control.draw_rect(Rect2(bx, by, 28 * S, 12 * S), PenzTheme.TEXT_TERTIARY, false, S)
+	var fill_w := 26.0 * S * (_battery_percent / 100.0)
+	var fill_color := PenzTheme.TEXT_SECONDARY
+	if _battery_percent < 20:
+		fill_color = PenzTheme.ERROR_RED
+	elif _battery_percent < 50:
+		fill_color = Color(0.85, 0.75, 0.3)
+	_battery_control.draw_rect(Rect2(bx + S, by + S, fill_w, 10 * S), fill_color)
+	_battery_control.draw_rect(Rect2(bx + 28 * S, by + 3 * S, 3 * S, 6 * S), PenzTheme.TEXT_TERTIARY)
+	var font := ThemeDB.fallback_font
+	_battery_control.draw_string(font, Vector2(bx + 34 * S, by + 10 * S), "%d%%" % _battery_percent,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * S), PenzTheme.TEXT_SECONDARY)
+
+
+func set_battery(percent: int) -> void:
+	_battery_percent = percent
+	_battery_control.queue_redraw()
 
 
 func set_mode(mode: String) -> void:
 	_mode_label.text = mode + "  "
-	match mode:
-		"live":
-			_status_dot.color = Color(0.2, 0.6, 1.0)
-		"idle":
-			_status_dot.color = Color.GRAY
-		"paper":
-			_status_dot.color = ACCENT
-		_:
-			_status_dot.color = Color.GRAY
 
 
 func set_connected(connected: bool) -> void:
-	_status_dot.color = ACCENT if connected else Color.GRAY
-
-
-func _make_icon_button(text: String, callback: Callable) -> Button:
-	var btn := Button.new()
-	btn.text = text
-	btn.flat = true
-	btn.add_theme_color_override("font_color", FONT_COLOR)
-	btn.add_theme_color_override("font_hover_color", Color.WHITE)
-	btn.add_theme_font_size_override("font_size", 13)
-	btn.custom_minimum_size = Vector2(64, 36)
-	btn.pressed.connect(callback)
-	return btn
+	_connected = connected
+	if connected:
+		_start_glow_pulse()
+	else:
+		_stop_glow_pulse()
+		_glow_alpha = 0.0
+	_led_control.queue_redraw()
 
 
 func show_message(text: String) -> void:
+	_toast_label.text = text
+	_toast_label.visible = true
+	_toast_label.modulate.a = 0.0
+	_toast_label.position = Vector2((get_viewport().get_visible_rect().size.x - _toast_label.get_minimum_size().x) / 2.0, BAR_H)
+
+	if _toast_tween:
+		_toast_tween.kill()
+	_toast_tween = create_tween()
+	_toast_tween.tween_property(_toast_label, "modulate:a", 1.0, 0.2)
+	_toast_tween.tween_interval(1.6)
+	_toast_tween.tween_property(_toast_label, "modulate:a", 0.0, 0.4)
+	_toast_tween.tween_callback(func(): _toast_label.visible = false)
+
 	_message_label.text = text
+	_message_label.visible = true
 	_message_timer.start()
 
 
 func flash_button() -> void:
-	# Visual feedback when Slate hardware button is pressed
-	_hw_button.add_theme_color_override("font_color", ACCENT)
-	_hw_flash_timer.start()
+	_hw_pressed = true
+	_hw_button.queue_redraw()
+	var timer: Timer = get_node_or_null("FlashTimer")
+	if timer:
+		timer.start()
 
 
 func _on_flash_end() -> void:
-	_hw_button.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+	_hw_pressed = false
+	_hw_button.queue_redraw()
+
+
+func _on_hw_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		hw_button_pressed.emit()
+		flash_button()
+
+
+func _start_glow_pulse() -> void:
+	if _glow_tween:
+		_glow_tween.kill()
+	_glow_tween = create_tween()
+	_glow_tween.set_loops()
+	_glow_tween.tween_property(self, "_glow_alpha", 1.0, 1.2).set_ease(Tween.EASE_IN_OUT)
+	_glow_tween.tween_property(self, "_glow_alpha", 0.0, 1.2).set_ease(Tween.EASE_IN_OUT)
+	_glow_tween.step_finished.connect(func(_s): _led_control.queue_redraw())
+
+
+func _stop_glow_pulse() -> void:
+	if _glow_tween:
+		_glow_tween.kill()
+		_glow_tween = null

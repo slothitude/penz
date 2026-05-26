@@ -1,42 +1,57 @@
 extends PanelContainer
-## OCR panel — slides up from bottom, shows extracted text from handwriting.
-## Backends: local Ollama (minicpm-v) or NVIDIA cloud (mistral-large-3).
+## OCR panel — elegant slide-up with backend toggle.
+## Backends: local Ollama (minicpm-v) or NVIDIA cloud.
+
+const PenzTheme = preload("res://ui/theme.gd")
 
 var _text_edit: TextEdit
 var _status_label: Label
 var _close_btn: Button
 var _copy_btn: Button
-var _backend_btn: Button
+var _backend_local: Button
+var _backend_cloud: Button
 var _busy: bool = false
 
 ## "local" = Ollama minicpm-v on localhost, "cloud" = NVIDIA API
 var _backend: String = "cloud"
-
-const BG_COLOR := Color(0.12, 0.12, 0.12, 0.95)
-const ACCENT := Color(0.3, 0.8, 0.4)
+var _slide_tween: Tween
 
 const NVIDIA_API_KEY := "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"
 const NVIDIA_MODEL := "meta/llama-3.2-90b-vision-instruct"
 
 
 func _ready() -> void:
-	var bg := StyleBoxFlat.new()
-	bg.bg_color = BG_COLOR
-	bg.set_corner_radius_all(12)
-	bg.border_color = Color(0.3, 0.3, 0.3)
-	bg.set_border_width_all(1)
+	anchors_preset = Control.PRESET_FULL_RECT
+
+	# Main container — anchored to bottom
+	var bg := PenzTheme.make_panel_bg()
+	bg.set_corner_radius_all(PenzTheme.CORNER_L)
+	# Only round top corners
+	bg.corner_radius_bottom_left = 0
+	bg.corner_radius_bottom_right = 0
 	add_theme_stylebox_override("panel", bg)
 
 	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
 	add_child(vbox)
 
-	# Header
+	# Drag handle
+	var handle := Control.new()
+	handle.custom_minimum_size = Vector2(36, 12)
+	handle.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	handle.draw.connect(func():
+		handle.draw_rect(Rect2(Vector2(0, 4), Vector2(36, 4)), Color(1, 1, 1, 0.15), false, -1, false)
+		handle.draw_rect(Rect2(Vector2(0, 4), Vector2(36, 4)), Color(1, 1, 1, 0.15))
+	)
+	vbox.add_child(handle)
+
+	# Header row
 	var header := HBoxContainer.new()
 	vbox.add_child(header)
 
 	_status_label = Label.new()
-	_status_label.text = "OCR"
-	_status_label.add_theme_color_override("font_color", Color.WHITE)
+	_status_label.text = "Transcription"
+	_status_label.add_theme_color_override("font_color", PenzTheme.TEXT_PRIMARY)
 	_status_label.add_theme_font_size_override("font_size", 16)
 	header.add_child(_status_label)
 
@@ -44,34 +59,71 @@ func _ready() -> void:
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(spacer)
 
-	_backend_btn = Button.new()
-	_backend_btn.text = "Cloud"
-	_backend_btn.flat = true
-	_backend_btn.add_theme_color_override("font_color", ACCENT)
-	_backend_btn.pressed.connect(_toggle_backend)
-	header.add_child(_backend_btn)
+	# Segmented backend toggle
+	_backend_local = Button.new()
+	_backend_local.text = "Local"
+	_backend_local.flat = false
+	_backend_local.toggle_mode = true
+	_backend_local.add_theme_stylebox_override("normal", _make_toggle_style(false))
+	_backend_local.add_theme_stylebox_override("hover", _make_toggle_style(false))
+	_backend_local.add_theme_stylebox_override("pressed", _make_toggle_style(true))
+	_backend_local.add_theme_font_size_override("font_size", 12)
+	_backend_local.add_theme_color_override("font_color", PenzTheme.TEXT_SECONDARY)
+	_backend_local.custom_minimum_size = Vector2(56, 28)
+	_backend_local.pressed.connect(_switch_to_local)
+	header.add_child(_backend_local)
 
-	_copy_btn = Button.new()
-	_copy_btn.text = "Copy"
-	_copy_btn.flat = true
-	_copy_btn.add_theme_color_override("font_color", ACCENT)
-	_copy_btn.pressed.connect(_copy_text)
+	_backend_cloud = Button.new()
+	_backend_cloud.text = "Cloud"
+	_backend_cloud.flat = false
+	_backend_cloud.toggle_mode = true
+	_backend_cloud.button_pressed = true
+	_backend_cloud.add_theme_stylebox_override("normal", _make_toggle_style(true))
+	_backend_cloud.add_theme_stylebox_override("hover", _make_toggle_style(true))
+	_backend_cloud.add_theme_stylebox_override("pressed", _make_toggle_style(false))
+	_backend_cloud.add_theme_font_size_override("font_size", 12)
+	_backend_cloud.add_theme_color_override("font_color", PenzTheme.TEXT_PRIMARY)
+	_backend_cloud.custom_minimum_size = Vector2(56, 28)
+	_backend_cloud.pressed.connect(_switch_to_cloud)
+	header.add_child(_backend_cloud)
+
+	# Copy button
+	_copy_btn = PenzTheme.make_text_button("Copy", _copy_text)
 	header.add_child(_copy_btn)
 
-	_close_btn = Button.new()
-	_close_btn.text = "Close"
-	_close_btn.flat = true
-	_close_btn.pressed.connect(func(): visible = false)
+	# Close button
+	_close_btn = PenzTheme.make_icon_button(PenzTheme.ICON_CLOSE, func(): _slide_out())
 	header.add_child(_close_btn)
 
-	# Text output
+	# Text output — warm paper background
 	_text_edit = TextEdit.new()
 	_text_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
-	_text_edit.add_theme_color_override("font_color", Color.WHITE)
+	_text_edit.add_theme_color_override("font_color", PenzTheme.TEXT_ON_PAPER)
 	_text_edit.add_theme_font_size_override("font_size", 15)
-	_text_edit.custom_minimum_size = Vector2(0, 120)
+	# Warm paper-like background for text area
+	var text_bg := StyleBoxFlat.new()
+	text_bg.bg_color = PenzTheme.PAPER_WARM
+	text_bg.set_corner_radius_all(PenzTheme.CORNER_M)
+	text_bg.content_margin_left = 12
+	text_bg.content_margin_right = 12
+	text_bg.content_margin_top = 8
+	text_bg.content_margin_bottom = 8
+	_text_edit.add_theme_stylebox_override("normal", text_bg)
+	_text_edit.add_theme_stylebox_override("read_only", text_bg)
+	_text_edit.custom_minimum_size = Vector2(0, 140)
 	_text_edit.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# Extra line spacing
+	_text_edit.add_theme_constant_override("line_spacing", 4)
 	vbox.add_child(_text_edit)
+
+	# Start hidden below screen
+	visible = false
+	_initial_position()
+
+
+func _initial_position() -> void:
+	# Position off-screen bottom for slide-up
+	offset_top = 600
 
 
 func run_ocr(png_data: PackedByteArray) -> void:
@@ -79,8 +131,8 @@ func run_ocr(png_data: PackedByteArray) -> void:
 		return
 	_busy = true
 	_text_edit.text = ""
-	_status_label.text = "OCR — analyzing..."
-	visible = true
+	_status_label.text = "Transcription — analyzing..."
+	_slide_in()
 
 	# Resize image to max 1200px wide for OCR
 	var img := Image.new()
@@ -156,9 +208,9 @@ func _run_cloud_ocr(png_data: PackedByteArray) -> void:
 		_busy = false
 
 
-func _on_local_ocr_response(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+func _on_local_ocr_response(result: int, _code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	_busy = false
-	_status_label.text = "OCR (local)"
+	_status_label.text = "Transcription (local)"
 
 	if result != HTTPRequest.RESULT_SUCCESS:
 		_text_edit.text = "Error: HTTP request failed (%d)" % result
@@ -182,9 +234,9 @@ func _on_local_ocr_response(result: int, code: int, _headers: PackedStringArray,
 	_cleanup_http()
 
 
-func _on_cloud_ocr_response(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+func _on_cloud_ocr_response(result: int, _code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	_busy = false
-	_status_label.text = "OCR (cloud)"
+	_status_label.text = "Transcription (cloud)"
 
 	if result != HTTPRequest.RESULT_SUCCESS:
 		_text_edit.text = "Error: cloud request failed (%d)" % result
@@ -215,17 +267,70 @@ func _cleanup_http() -> void:
 			child.queue_free()
 
 
-func _toggle_backend() -> void:
-	if _backend == "cloud":
-		_backend = "local"
-		_backend_btn.text = "Local"
-	else:
-		_backend = "cloud"
-		_backend_btn.text = "Cloud"
+func _switch_to_local() -> void:
+	_backend = "local"
+	_backend_local.button_pressed = true
+	_backend_cloud.button_pressed = false
+	_backend_local.add_theme_stylebox_override("normal", _make_toggle_style(true))
+	_backend_local.add_theme_color_override("font_color", PenzTheme.TEXT_PRIMARY)
+	_backend_cloud.add_theme_stylebox_override("normal", _make_toggle_style(false))
+	_backend_cloud.add_theme_color_override("font_color", PenzTheme.TEXT_SECONDARY)
+
+
+func _switch_to_cloud() -> void:
+	_backend = "cloud"
+	_backend_cloud.button_pressed = true
+	_backend_local.button_pressed = false
+	_backend_cloud.add_theme_stylebox_override("normal", _make_toggle_style(true))
+	_backend_cloud.add_theme_color_override("font_color", PenzTheme.TEXT_PRIMARY)
+	_backend_local.add_theme_stylebox_override("normal", _make_toggle_style(false))
+	_backend_local.add_theme_color_override("font_color", PenzTheme.TEXT_SECONDARY)
 
 
 func _copy_text() -> void:
 	DisplayServer.clipboard_set(_text_edit.text)
-	_copy_btn.text = "Copied!"
-	var t := get_tree().create_timer(1.5)
-	t.timeout.connect(func(): _copy_btn.text = "Copy")
+	_copy_btn.text = PenzTheme.ICON_DONE + " Copied"
+	_copy_btn.add_theme_color_override("font_color", PenzTheme.ACCENT)
+	# Scale pulse feedback
+	var tween := create_tween()
+	tween.tween_property(_copy_btn, "scale", Vector2(1.08, 1.08), 0.1)
+	tween.tween_property(_copy_btn, "scale", Vector2.ONE, 0.1)
+	tween.tween_interval(1.2)
+	tween.tween_callback(func():
+		_copy_btn.text = "Copy"
+		_copy_btn.add_theme_color_override("font_color", PenzTheme.TEXT_SECONDARY)
+	)
+
+
+func _make_toggle_style(active: bool) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	if active:
+		s.bg_color = PenzTheme.ACCENT
+		s.content_margin_left = 8
+		s.content_margin_right = 8
+		s.content_margin_top = 4
+		s.content_margin_bottom = 4
+	else:
+		s.bg_color = Color(1, 1, 1, 0.06)
+		s.content_margin_left = 8
+		s.content_margin_right = 8
+		s.content_margin_top = 4
+		s.content_margin_bottom = 4
+	return s
+
+
+func _slide_in() -> void:
+	visible = true
+	offset_top = 600  # below screen
+	if _slide_tween:
+		_slide_tween.kill()
+	_slide_tween = create_tween()
+	_slide_tween.tween_property(self, "offset_top", 0.0, 0.35).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+
+
+func _slide_out() -> void:
+	if _slide_tween:
+		_slide_tween.kill()
+	_slide_tween = create_tween()
+	_slide_tween.tween_property(self, "offset_top", 600.0, 0.25).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_CUBIC)
+	_slide_tween.tween_callback(func(): visible = false)

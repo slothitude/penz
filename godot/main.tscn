@@ -34,8 +34,9 @@ script = ExtResource("3")
 layer = 1
 
 [node name="HUD" type="HBoxContainer" parent="HUDLayer"]
-offset_right = 1080.0
-offset_bottom = 48.0
+anchor_right = 1.0
+offset_bottom = 144.0
+grow_horizontal = 2
 script = ExtResource("4")
 
 [node name="ToolbarLayer" type="CanvasLayer" parent="."]
@@ -43,10 +44,11 @@ layer = 1
 
 [node name="Toolbar" type="HBoxContainer" parent="ToolbarLayer"]
 anchors_preset = 3
+anchor_left = 0.0
 anchor_top = 1.0
+anchor_right = 1.0
 anchor_bottom = 1.0
-offset_top = -52.0
-offset_right = 1080.0
+offset_top = -168.0
 grow_vertical = 0
 script = ExtResource("5")
 
@@ -81,10 +83,11 @@ script = ExtResource("8")
 [node name="OCRPanel" type="PanelContainer" parent="DialogLayer"]
 visible = false
 anchors_preset = 3
+anchor_left = 0.0
 anchor_top = 1.0
+anchor_right = 1.0
 anchor_bottom = 1.0
 offset_top = -200.0
-offset_right = 1080.0
 grow_vertical = 0
 script = ExtResource("9")
 

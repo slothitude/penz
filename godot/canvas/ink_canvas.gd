@@ -4,6 +4,7 @@ extends Control
 
 const CanvasTransform = preload("res://canvas/canvas_transform.gd")
 const StrokeStore = preload("res://canvas/stroke_store.gd")
+const PenzTheme = preload("res://ui/theme.gd")
 
 var _store: RefCounted  # StrokeStore
 var _active_stroke: Node2D
@@ -21,6 +22,24 @@ func _ready() -> void:
 
 func _on_resize() -> void:
 	_canvas_size = size
+	queue_redraw()
+
+
+func _draw() -> void:
+	# Warm paper background
+	draw_rect(Rect2(Vector2.ZERO, size), PenzTheme.PAPER)
+
+	# Subtle dot grid — 30px spacing, very faint circles
+	var spacing := 30.0
+	var dot_color := PenzTheme.DOT_GRID
+	var dot_radius := 1.0
+	var x := spacing
+	while x < size.x:
+		var y := spacing
+		while y < size.y:
+			draw_circle(Vector2(x, y), dot_radius, dot_color)
+			y += spacing
+		x += spacing
 
 
 func add_point(x: int, y: int, pressure: int) -> void:
@@ -54,6 +73,7 @@ func clear() -> void:
 		s.queue_free()
 	_completed_strokes.clear()
 	_store.clear()
+	queue_redraw()
 
 
 func save_current_page() -> String:
@@ -84,11 +104,16 @@ func export_png() -> PackedByteArray:
 	var vp := SubViewport.new()
 	vp.size = size
 	vp.transparent_bg = false
-	# White background
+	# Warm paper background
 	var bg := ColorRect.new()
-	bg.color = Color.WHITE
+	bg.color = PenzTheme.PAPER
 	bg.size = size
 	vp.add_child(bg)
+	# Dot grid in export too
+	var grid_control := Control.new()
+	grid_control.set_script(preload("res://canvas/dot_grid.gd"))
+	grid_control.size = size
+	vp.add_child(grid_control)
 	# Render all completed strokes
 	for s in _completed_strokes:
 		var dup: Node2D = s.duplicate()
@@ -121,20 +146,18 @@ func _save_thumbnail(thumb_path: String) -> void:
 	vp.size = thumb_size
 	vp.transparent_bg = false
 	var bg := ColorRect.new()
-	bg.color = Color.WHITE
+	bg.color = PenzTheme.PAPER
 	bg.size = thumb_size
 	vp.add_child(bg)
+	var thumb_scale := thumb_size / _canvas_size
 	for s in _completed_strokes:
 		var dup: Node2D = s.duplicate()
-		# Scale stroke renderers from screen coords to thumbnail
-		var scale := thumb_size / _canvas_size
-		dup.scale = scale
+		dup.scale = thumb_scale
 		dup.position = Vector2.ZERO
 		vp.add_child(dup)
 	if _active_stroke:
 		var dup: Node2D = _active_stroke.duplicate()
-		var scale := thumb_size / _canvas_size
-		dup.scale = scale
+		dup.scale = thumb_scale
 		dup.position = Vector2.ZERO
 		vp.add_child(dup)
 	add_child(vp)
@@ -147,5 +170,5 @@ func _save_thumbnail(thumb_path: String) -> void:
 
 func _create_stroke_renderer() -> Node2D:
 	var node := Node2D.new()
-	node.set_script(load("res://canvas/stroke_renderer.gd"))
+	node.set_script(preload("res://canvas/stroke_renderer.gd"))
 	return node

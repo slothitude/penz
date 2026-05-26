@@ -2,6 +2,8 @@ extends Control
 ## Main entry point — CanvasLayer overlay architecture.
 ## InkCanvas fills the screen, HUD/toolbar float over it.
 
+const PenzTheme = preload("res://ui/theme.gd")
+
 @onready var ble = $BLEBridge
 @onready var ink_canvas = $InkCanvas
 @onready var hud_layer: CanvasLayer = $HUDLayer
@@ -21,6 +23,7 @@ var _page_just_saved: bool = false
 var _executing: bool = false
 var _press_count: int = 0
 var _press_timer: Timer
+var _hud_tween: Tween
 
 
 func _ready() -> void:
@@ -66,6 +69,10 @@ func _ready() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# Screenshot capture (F12)
+	if event is InputEventKey and event.keycode == KEY_F12 and event.pressed:
+		_capture_viewport()
+		return
 	# Toggle HUD visibility on tap (Android) or right-click (desktop)
 	if event is InputEventScreenTouch and event.pressed:
 		if not _is_over_ui(event.position):
@@ -76,14 +83,28 @@ func _input(event: InputEvent) -> void:
 
 func _toggle_hud() -> void:
 	_hud_visible = not _hud_visible
-	hud_layer.visible = _hud_visible
-	toolbar_layer.visible = _hud_visible
+	if _hud_tween:
+		_hud_tween.kill()
+	_hud_tween = create_tween()
+	var target_alpha := 1.0 if _hud_visible else 0.0
+	_hud_tween.parallel().tween_property(hud, "modulate:a", target_alpha, 0.25)
+	_hud_tween.parallel().tween_property(toolbar, "modulate:a", target_alpha, 0.25)
+	# Keep visible for hit testing but adjust modulate
+	if _hud_visible:
+		hud_layer.visible = true
+		toolbar_layer.visible = true
+	else:
+		_hud_tween.tween_callback(func():
+			hud_layer.visible = false
+			toolbar_layer.visible = false
+		)
 
 
 func _is_over_ui(pos: Vector2) -> bool:
-	# Check if touch is on HUD or toolbar area
-	var hud_rect := Rect2(Vector2.ZERO, Vector2(size.x, 48))
-	var tb_rect := Rect2(Vector2(0, size.y - 52), Vector2(size.x, 52))
+	var hud_h := 48.0 * PenzTheme.UI_SCALE
+	var tb_h := 56.0 * PenzTheme.UI_SCALE
+	var hud_rect := Rect2(Vector2.ZERO, Vector2(size.x, hud_h))
+	var tb_rect := Rect2(Vector2(0, size.y - tb_h), Vector2(size.x, tb_h))
 	return hud_rect.has_point(pos) or tb_rect.has_point(pos)
 
 
@@ -92,8 +113,11 @@ func _schedule_hud_auto_hide() -> void:
 	t.timeout.connect(func():
 		if _point_count > 0:
 			_hud_visible = false
-			hud_layer.visible = false
-			toolbar_layer.visible = false
+			if _hud_tween:
+				_hud_tween.kill()
+			_hud_tween = create_tween()
+			_hud_tween.parallel().tween_property(hud, "modulate:a", 0.3, 0.4)
+			_hud_tween.parallel().tween_property(toolbar, "modulate:a", 0.3, 0.4)
 	)
 
 
@@ -151,7 +175,6 @@ func _on_connection_progress(step: String) -> void:
 
 
 func _on_new_page() -> void:
-	# Called from toolbar "New" button — immediate save, no gesture delay
 	_press_timer.stop()
 	_press_count = 0
 	_page_just_saved = true
@@ -162,7 +185,6 @@ func _on_new_page() -> void:
 
 
 func _on_button_pressed() -> void:
-	# Called from BLE 0xCB or GUI button — gesture detection
 	if _executing:
 		return
 	hud.flash_button()
@@ -198,7 +220,6 @@ func _execute_double_press() -> void:
 	_executing = true
 	hud.show_message("OCR + Save")
 	_page_just_saved = true
-	# Run OCR before clearing
 	var png_data: PackedByteArray = await ink_canvas.export_png()
 	if png_data.size() > 0:
 		ocr_panel.run_ocr(png_data)
@@ -227,11 +248,26 @@ func _on_ocr() -> void:
 
 func _show_gallery() -> void:
 	gallery.refresh()
-	gallery.visible = true
+	_fade_in(gallery)
 
 
 func _show_settings() -> void:
-	settings_panel.visible = true
+	_fade_in(settings_panel)
+
+
+# ── Fade transitions ────────────────────────────────────────────────
+
+func _fade_in(panel: Control) -> void:
+	panel.visible = true
+	panel.modulate.a = 0.0
+	var tween := create_tween()
+	tween.tween_property(panel, "modulate:a", 1.0, 0.2)
+
+
+func _fade_out(panel: Control) -> void:
+	var tween := create_tween()
+	tween.tween_property(panel, "modulate:a", 0.0, 0.2)
+	tween.tween_callback(func(): panel.visible = false)
 
 
 # ── Font maker ──────────────────────────────────────────────────────
@@ -250,7 +286,6 @@ func _on_font() -> void:
 		hud.show_message("Export failed")
 		return
 
-	# Save PNG to temp file for fontmaker.py
 	var tmp_dir := ProjectSettings.globalize_path("user://tmp")
 	if not DirAccess.dir_exists_absolute(tmp_dir):
 		DirAccess.make_dir_recursive_absolute(tmp_dir)
@@ -263,7 +298,6 @@ func _on_font() -> void:
 	f.close()
 
 	var outdir := tmp_dir + "/glyphs"
-	# Clean old glyphs
 	if DirAccess.dir_exists_absolute(outdir):
 		var da := DirAccess.open(outdir)
 		if da:
@@ -286,7 +320,6 @@ func _on_font() -> void:
 		hud.show_message("Cannot start fontmaker")
 		return
 
-	# Poll for completion
 	if _segment_timer:
 		_segment_timer.stop()
 	_segment_timer = Timer.new()
@@ -303,7 +336,6 @@ func _poll_segment(outdir: String) -> void:
 	_segment_timer.queue_free()
 	_segment_timer = null
 
-	# Collect glyph PNGs
 	if not DirAccess.dir_exists_absolute(outdir):
 		hud.show_message("Segment failed")
 		_segment_pid = -1
@@ -330,6 +362,24 @@ func _poll_segment(outdir: String) -> void:
 
 	paths.sort()
 	glyph_labeller.load_glyphs(paths)
-	glyph_labeller.visible = true
+	_fade_in(glyph_labeller)
 	hud.show_message("Found %d glyphs" % paths.size())
 	_segment_pid = -1
+
+
+# ── Viewport capture ──────────────────────────────────────────────
+
+func _capture_viewport() -> void:
+	# Wait 2 frames so everything is rendered
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var vp := get_viewport()
+	var tex := vp.get_texture()
+	var img := tex.get_image()
+	if img == null:
+		print("VIEWPORT_CAPTURE: image is null")
+		return
+	var path := "user://viewport_capture.png"
+	var err := img.save_png(path)
+	var global_path := ProjectSettings.globalize_path(path)
+	print("VIEWPORT_CAPTURE: ", global_path, " err=", err, " size=", img.get_size())

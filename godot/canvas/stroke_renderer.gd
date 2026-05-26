@@ -2,11 +2,13 @@ extends Node2D
 ## Renders a single ink stroke as a thick Line2D.
 ## Width is based on running average pressure for consistency.
 
+const PenzTheme = preload("res://ui/theme.gd")
+
 var _points: Array[Vector3] = []  # (x, y, pressure) in screen coords
 var _line: Line2D
 var _pressure_sum: float = 0.0
 
-const INK_COLOR := Color.BLACK
+const INK_COLOR := PenzTheme.INK
 const BASE_MIN_WIDTH := 2.0
 const PRESSURE_DIVISOR := 200.0
 
