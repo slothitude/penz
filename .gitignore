@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Godot editor cache
+godot/.godot/editor/
+godot/.godot/uid_cache.bin
+
+# Local device data
+data/
+
+# Debug/test screenshots
+*.png
+!godot/screenshot.png
+
+# One-off test scripts
+test_*.py
+
+# Misc local dirs
+wacom-slate/
