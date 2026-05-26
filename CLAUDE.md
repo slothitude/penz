@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Penz — BLE capture tools for the Wacom Bamboo Slate smartpad. Captures real-time pen strokes over Bluetooth Low Energy and syncs stored pages from the device. Runs on Windows (Rog) using WinRT BLE APIs.
+Penz — BLE capture tools for the Wacom Bamboo Slate smartpad. Captures real-time pen strokes over Bluetooth Low Energy and syncs stored pages from the device. Python tools run on Windows (Rog) using WinRT BLE APIs. Godot 4.6 app provides native UI for both Windows and Android.
 
 ## Architecture
 
@@ -63,7 +63,51 @@ Enter live mode requires writes to 4 characteristics in order:
 | `0xCA` | Delete page | sync |
 | `0xEC` | Select file transfer | sync |
 
-## Commands
+## Godot App (`godot/`)
+
+Cross-platform native app with direct BLE on Android and subprocess BLE on Windows.
+
+### Architecture: CanvasLayer Overlay
+```
+InkCanvas (full-screen base) — Wacom 21600×14700 → screen coordinates
+  HUDLayer (CanvasLayer) — floating top bar, semi-transparent
+  ToolbarLayer (CanvasLayer) — floating bottom bar
+  DialogLayer (CanvasLayer) — connect dialog, gallery, settings, OCR panel, glyph labeller
+```
+
+### BLE Backends
+- **Windows**: `capture.py --json-stdout` subprocess → pipe file → `ble_bridge.gd` polls at 60fps
+- **Android**: Kotlin plugin (`PenzBLEPlugin.kt`) — direct `BluetoothGatt` with full Wacom protocol
+
+### Key Files
+| File | Role |
+|------|------|
+| `godot/main.gd` | Bootstrap, wires BLE bridge + canvas + UI |
+| `godot/core/ble_bridge.gd` | Platform dispatch — Android plugin vs Windows subprocess |
+| `godot/canvas/ink_canvas.gd` | Drawing surface — Line2D strokes baked to SubViewport texture |
+| `godot/canvas/stroke_store.gd` | Stroke data + SVG export (same format as canvas.py) |
+| `godot/canvas/canvas_transform.gd` | Wacom 21600×14700 → screen coordinate mapping |
+| `godot/ui/ocr_panel.gd` | OCR via Ollama `glm-ocr` model (localhost:11434) |
+| `godot/ui/glyph_labeller.gd` | Font maker UI — label segmented glyphs → build TTF |
+| `godot/fontmaker.py` | Python subprocess: segment glyphs (OpenCV) + build TTF (fonttools) |
+| `godot/android/plugin/` | Kotlin BLE plugin — full Wacom protocol reimplementation |
+
+### New Pipeline Features
+- **OCR**: Canvas → PNG → Ollama `glm-ocr` → extracted text panel
+- **Font Maker**: Canvas → PNG → OpenCV segmentation → glyph labeller UI → potrace + fonttools → TTF
+
+### Commands
+```bash
+# Open in Godot editor
+cd godot && godot project.godot
+
+# Run from command line
+godot godot/project.godot
+
+# Font maker standalone
+python godot/fontmaker.py segment --input image.png --outdir tmp/glyphs
+python godot/fontmaker.py build --glyphs tmp/glyphs/ --labels A,b,c,d --output font.ttf
+```
 
 ```bash
 # Install dependencies

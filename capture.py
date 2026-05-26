@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import struct
+import sys
 import time
 import uuid
 from collections import deque
@@ -26,7 +27,7 @@ CHAR_1531 = "00001531-1212-efde-1523-785feabcd123"
 CHAR_1532 = "00001532-1212-efde-1523-785feabcd123"
 CHAR_FFEE2 = "ffee0002-bbaa-9988-7766-554433221100"
 DEVICE_ADDR_INT = 0xFCF569C5F94B
-UUID_FILE = "data/device_uuid.json"
+UUID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "device_uuid.json")
 
 # Wacom protocol opcodes
 CMD_CHECK_AUTH = 0xE6
@@ -34,7 +35,9 @@ CMD_SET_TIME = 0xB6
 CMD_GET_BATTERY = 0xB9
 CMD_SET_MODE = 0xB1
 MODE_LIVE = 0x00
+MODE_PAPER = 0x01
 MODE_IDLE = 0x02
+OP_BUTTON_PRESS = 0xCB
 
 
 class PenCapture:
@@ -372,22 +375,207 @@ class PenCapture:
         self._char_1531 = self._char_1532 = self._char_ffee2 = None
 
 
+class JsonStdoutCanvas:
+    """Minimal canvas substitute that emits JSON lines for Godot."""
+    def __init__(self):
+        pass
+
+    def add_point(self, x, y, pressure):
+        _json_out({"type": "point", "x": x, "y": y, "p": pressure})
+
+    def pen_up(self):
+        _json_out({"type": "stroke_end"})
+
+    def save(self, path):
+        pass  # Godot handles saving
+
+
+class JsonPenCapture(PenCapture):
+    """PenCapture subclass that emits JSON progress instead of print()."""
+    def __init__(self, canvas=None):
+        super().__init__(canvas=canvas, api_url=None, on_point=None)
+
+    def _on_nordic(self, char, args):
+        """Override to detect button press (0xE4) and mode changes."""
+        from winrt.windows.storage.streams import DataReader
+        try:
+            reader = DataReader.from_buffer(args.characteristic_value)
+            data = bytes(reader.read_byte() for _ in range(reader.unconsumed_buffer_length))
+            if len(data) >= 1 and data[0] == OP_BUTTON_PRESS:
+                _json_out({"type": "button_press"})
+                self.canvas.pen_up()
+            else:
+                self.got.append(data)
+        except Exception:
+            pass
+
+    async def connect_and_stream(self):
+        from winrt.windows.devices.bluetooth import BluetoothLEDevice, BluetoothCacheMode
+        from winrt.windows.devices.bluetooth.genericattributeprofile import (
+            GattSharingMode,
+            GattClientCharacteristicConfigurationDescriptorValue,
+            GattSession,
+        )
+
+        # Load UUID
+        if os.path.exists(UUID_FILE):
+            with open(UUID_FILE) as f:
+                self._device_uuid = bytes.fromhex(json.load(f)["uuid"])
+        else:
+            _json_out({"type": "error", "message": "No device UUID found. Run register.py first."})
+            return False
+
+        # Connect
+        _json_out({"type": "progress", "step": "connecting"})
+        self._device = await BluetoothLEDevice.from_bluetooth_address_async(DEVICE_ADDR_INT)
+        if not self._device:
+            _json_out({"type": "error", "message": "Device not found. Make sure it's paired and on."})
+            return False
+
+        session = await GattSession.from_device_id_async(self._device.bluetooth_device_id)
+        session.maintain_connection = True
+
+        for i in range(40):
+            if self._device.connection_status == 1:
+                break
+            await asyncio.sleep(1)
+
+        # Nordic UART
+        _json_out({"type": "progress", "step": "discovering_services"})
+        self._nordic_svc = self._device.get_gatt_service(NORDIC_SVC_UUID)
+        await self._nordic_svc.open_async(GattSharingMode.SHARED_READ_AND_WRITE)
+        chars = await self._nordic_svc.get_characteristics_with_cache_mode_async(
+            BluetoothCacheMode.UNCACHED)
+        for c in chars.characteristics:
+            s = str(c.uuid)
+            if s == NORDIC_TX_UUID:
+                self._tx_char = c
+            elif s == NORDIC_RX_UUID:
+                self._rx_char = c
+
+        if not self._tx_char or not self._rx_char:
+            _json_out({"type": "error", "message": "Nordic UART not found"})
+            self._cleanup()
+            return False
+
+        # Subscribe to RX
+        self._rx_char.add_value_changed(self._on_nordic)
+        await self._rx_char.write_client_characteristic_configuration_descriptor_async(
+            GattClientCharacteristicConfigurationDescriptorValue.NOTIFY)
+        await asyncio.sleep(2)
+        self.got.clear()
+
+        # Set time
+        now = time.localtime()
+        td = bytes([now.tm_year % 100, now.tm_mon, now.tm_mday,
+                     now.tm_hour, now.tm_min, now.tm_sec])
+        await self._tx_char.write_value_with_result_async(
+            self._write_frame(bytes([CMD_SET_TIME, len(td)]) + td))
+        await asyncio.sleep(1)
+
+        # Battery
+        _json_out({"type": "progress", "step": "querying_battery"})
+        self.got.clear()
+        await self._tx_char.write_value_with_result_async(
+            self._write_frame(bytes([CMD_GET_BATTERY, 0x01, 0x00])))
+        await asyncio.sleep(1)
+        for r in self.got:
+            if len(r) > 2:
+                _json_out({"type": "status", "info": {"battery": r[2]}})
+
+        # Live service
+        self._live_svc = self._device.get_gatt_service(LIVE_SVC_UUID)
+        await self._live_svc.open_async(GattSharingMode.SHARED_READ_AND_WRITE)
+        live_chars = await self._live_svc.get_characteristics_with_cache_mode_async(
+            BluetoothCacheMode.UNCACHED)
+        for c in live_chars.characteristics:
+            if str(c.uuid) == LIVE_CHAR_UUID:
+                self._live_char = c
+                break
+
+        if self._live_char:
+            self._live_char.add_value_changed(self._on_live)
+            await self._live_char.write_client_characteristic_configuration_descriptor_async(
+                GattClientCharacteristicConfigurationDescriptorValue.NOTIFY)
+
+        # Enter live mode
+        _json_out({"type": "progress", "step": "entering_live"})
+
+        self.connected = True
+        _json_out({"type": "connected"})
+
+        await self._enter_live_mode()
+
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+
+        self.connected = False
+        self._cleanup()
+        _json_out({"type": "disconnected"})
+        return True
+
+
+_pipe_file = None
+
+
+def _json_out(obj):
+    """Write a JSON line to stdout and pipe file."""
+    line = json.dumps(obj)
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    if _pipe_file:
+        _pipe_file.write(line + "\n")
+        _pipe_file.flush()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Capture Wacom Bamboo Slate ink data")
     parser.add_argument("--save", default=None, help="Save canvas to this path on exit")
     parser.add_argument("--api", default=None, help="POST strokes to server URL")
+    parser.add_argument("--json-stdout", action="store_true",
+                        help="Output JSON lines for Godot subprocess mode")
+    parser.add_argument("--uuid", default=None, help="Device UUID hex (overrides file)")
+    parser.add_argument("--pipe", default=None, help="JSONL file path for Godot IPC")
     args = parser.parse_args()
 
-    canvas = InkCanvas()
-    capture = PenCapture(canvas=canvas, api_url=args.api)
-    try:
-        asyncio.run(capture.connect_and_stream())
-    except KeyboardInterrupt:
-        pass
+    if args.json_stdout:
+        # JSON subprocess mode for Godot
+        if args.uuid:
+            with open(UUID_FILE, "w") as f:
+                json.dump({"uuid": args.uuid}, f)
 
-    canvas.pen_up()
-    save_path = args.save or "data/live_capture.svg"
-    canvas.save(save_path)
-    print(f"Canvas saved to {save_path}")
-    if capture._posted:
-        print(f"Posted {capture._posted} points to server")
+        # Open pipe file if specified
+        if args.pipe:
+            pipe_dir = os.path.dirname(args.pipe)
+            if pipe_dir:
+                os.makedirs(pipe_dir, exist_ok=True)
+            _pipe_file = open(args.pipe, "w", encoding="utf-8")
+
+        canvas = JsonStdoutCanvas()
+        capture = JsonPenCapture(canvas=canvas)
+
+        try:
+            asyncio.run(capture.connect_and_stream())
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        _json_out({"type": "disconnected"})
+        if _pipe_file:
+            _pipe_file.close()
+    else:
+        # Normal interactive mode
+        canvas = InkCanvas()
+        capture = PenCapture(canvas=canvas, api_url=args.api)
+        try:
+            asyncio.run(capture.connect_and_stream())
+        except KeyboardInterrupt:
+            pass
+
+        canvas.pen_up()
+        save_path = args.save or "data/live_capture.svg"
+        canvas.save(save_path)
+        print(f"Canvas saved to {save_path}")
+        if capture._posted:
+            print(f"Posted {capture._posted} points to server")

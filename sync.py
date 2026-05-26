@@ -21,8 +21,20 @@ NORDIC_TX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 TRANSFER_CHAR = "ffee0003-bbaa-9988-7766-554433221100"
 DEVICE_ADDR = "FC:F5:69:C5:F9:4B"
 DEVICE_ADDR_INT = 0xFCF569C5F94B
-UUID_FILE = "data/device_uuid.json"
+UUID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "device_uuid.json")
 OUTPUT_DIR = "data/pages"
+
+_sync_pipe = None
+
+
+def _sync_out(obj):
+    """Write a JSON line to stdout and pipe file."""
+    line = json.dumps(obj)
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    if _sync_pipe:
+        _sync_pipe.write(line + "\n")
+        _sync_pipe.flush()
 
 
 # ─── Stroke file parser (Wacom proprietary binary) ─────────────────────────
@@ -391,13 +403,168 @@ class PageSyncer:
             print(f"\nDone! Synced {file_count} pages to {OUTPUT_DIR}/", flush=True)
 
 
+class JsonPageSyncer(PageSyncer):
+    """PageSyncer that emits JSON progress for Godot."""
+
+    async def run(self):
+        # Load UUID
+        if not os.path.exists(UUID_FILE):
+            _sync_out({"type": "error", "message": "No UUID file. Run register.py first."})
+            return
+        with open(UUID_FILE) as f:
+            uuid = bytes.fromhex(json.load(f)["uuid"])
+
+        # Wake device
+        from winrt.windows.devices.bluetooth import BluetoothLEDevice
+
+        _sync_out({"type": "progress", "step": "waking"})
+        device = await BluetoothLEDevice.from_bluetooth_address_async(DEVICE_ADDR_INT)
+        if not device:
+            _sync_out({"type": "error", "message": "Device not found"})
+            return
+        device.close()
+        await asyncio.sleep(1)
+
+        # Connect
+        _sync_out({"type": "progress", "step": "connecting"})
+        async with BleakClient(DEVICE_ADDR, timeout=30.0, use_cached=True) as client:
+            await client.start_notify(NORDIC_RX, self._on_nordic)
+            await client.start_notify(TRANSFER_CHAR, self._on_transfer)
+
+            # Auth
+            _sync_out({"type": "progress", "step": "authenticating"})
+            r = await self._send(client, 0xE6, uuid)
+            if not r or len(r) < 3 or r[2] != 0x00:
+                _sync_out({"type": "error", "message": "Auth failed"})
+                return
+
+            # Set time
+            now = time.localtime()
+            await self._send(client, 0xB6, bytes([now.tm_year % 100, now.tm_mon, now.tm_mday,
+                                                    now.tm_hour, now.tm_min, now.tm_sec]))
+
+            # Select file transfer
+            _sync_out({"type": "progress", "step": "selecting_transfer"})
+            await self._send(client, 0xEC, b"\x06\x00\x00\x00\x00\x00")
+
+            # Paper mode
+            await self._send(client, 0xB1, b"\x01")
+
+            # Get file count
+            r = await self._send(client, 0xC1, b"\x00")
+            if not r or r[0] != 0xC2:
+                _sync_out({"type": "error", "message": "Failed to get file count"})
+                return
+            file_count = struct.unpack_from("<H", r, 2)[0]
+            _sync_out({"type": "sync_status", "total": file_count})
+
+            if file_count == 0:
+                _sync_out({"type": "sync_done", "pages": []})
+                return
+
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), OUTPUT_DIR)
+            os.makedirs(output_dir, exist_ok=True)
+            synced_pages = []
+
+            for i in range(file_count):
+                _sync_out({"type": "progress", "step": f"Downloading page {i + 1}/{file_count}"})
+
+                # Get stroke info
+                r = await self._send(client, 0xCC, b"\x00")
+                if not r or r[0] != 0xCF:
+                    break
+
+                data_size = struct.unpack_from("<I", r, 2)[0]
+                ts_bytes = r[6:12]
+                ts_str = "".join(f"{b:02x}" for b in ts_bytes)
+                try:
+                    ts_dt = datetime.strptime(ts_str, "%y%m%d%H%M%S")
+                    ts_label = ts_dt.strftime("%Y%m%d_%H%M%S")
+                except ValueError:
+                    ts_label = f"page_{int(time.time())}"
+
+                # Download
+                self.pen_data.clear()
+                self.notifications.clear()
+                r = await self._send(client, 0xC3, b"\x00")
+                if not r or r[0] != 0xC8 or len(r) < 3 or r[2] != 0xBE:
+                    break
+
+                got_end = False
+                got_crc = False
+                crc_value = None
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and not (got_end and got_crc):
+                    while self.notifications:
+                        reply = self.notifications.popleft()
+                        if reply[0] == 0xC8 and len(reply) >= 3:
+                            if reply[2] == 0xED:
+                                got_end = True
+                            elif not got_crc:
+                                crc_data = reply[2:]
+                                if len(crc_data) >= 4:
+                                    crc_value = int.from_bytes(crc_data[:4][::-1], "little")
+                                    got_crc = True
+                    await asyncio.sleep(0.1)
+
+                if not got_end:
+                    break
+
+                raw = bytes(self.pen_data)
+
+                # Parse strokes
+                sf = StrokeFile(raw)
+                strokes = sf.parse()
+                total_points = sum(len(s) for s in strokes)
+
+                if total_points == 0:
+                    await self._send(client, 0xCA, b"\x00")
+                    continue
+
+                # Save SVG
+                canvas = InkCanvas()
+                for stroke in strokes:
+                    for x, y, p in stroke:
+                        canvas.add_point(x, y, p)
+                    canvas.pen_up()
+
+                out_path = os.path.join(output_dir, f"{ts_label}.svg")
+                canvas.save(out_path)
+                synced_pages.append(out_path)
+                _sync_out({"type": "page_synced", "path": out_path, "strokes": len(strokes), "points": total_points})
+
+                # Delete from device
+                await self._send(client, 0xCA, b"\x00")
+
+            await self._send(client, 0xB1, b"\x02")
+            _sync_out({"type": "sync_done", "pages": synced_pages})
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync stored pages from Wacom Bamboo Slate")
     parser.add_argument("--keep", action="store_true", help="Don't delete pages from device after sync")
+    parser.add_argument("--json-stdout", action="store_true", help="JSON output for Godot")
+    parser.add_argument("--pipe", default=None, help="JSONL file for Godot IPC")
     args = parser.parse_args()
 
-    syncer = PageSyncer()
-    try:
-        asyncio.run(syncer.run())
-    except KeyboardInterrupt:
-        pass
+    if args.json_stdout:
+        if args.pipe:
+            pipe_dir = os.path.dirname(args.pipe)
+            if pipe_dir:
+                os.makedirs(pipe_dir, exist_ok=True)
+            _sync_pipe = open(args.pipe, "w", encoding="utf-8")
+
+        syncer = JsonPageSyncer()
+        try:
+            asyncio.run(syncer.run())
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        _sync_out({"type": "sync_done", "pages": []})
+        if _sync_pipe:
+            _sync_pipe.close()
+    else:
+        syncer = PageSyncer()
+        try:
+            asyncio.run(syncer.run())
+        except KeyboardInterrupt:
+            pass
