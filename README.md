@@ -299,6 +299,10 @@ penz/
 - **[Tuhi](https://github.com/tuhiproject/tuhi)** — GTK app for Wacom smartpad stored page download (Linux, Python/GTK)
 - **[Wacom Inkspace (decompiled)](https://github.com/elliotberry/wacom-inkspace)** — Decompiled official app, useful for protocol reference
 
+### Shoutout to Tuhi
+
+Before Penz existed, [Tuhi](https://github.com/tuhiproject/tuhi) was *the* tool for talking to Wacom smartpads. They blazed the trail reverse-engineering the BLE protocol, figured out the GATT service map, the authentication flow, the binary stroke format — all the foundational work that made projects like this possible. I used Tuhi back when it was the only option, and it worked great for pulling pages off the Slate on Linux. This project stands on their shoulders.
+
 ## License
 
 MIT
