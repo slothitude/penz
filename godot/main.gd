@@ -18,6 +18,7 @@ extends Control
 var _point_count: int = 0
 var _hud_visible: bool = true
 var _page_just_saved: bool = false
+var _executing: bool = false
 var _press_count: int = 0
 var _press_timer: Timer
 
@@ -41,6 +42,7 @@ func _ready() -> void:
 	toolbar.font_pressed.connect(_on_font)
 	hud.gallery_pressed.connect(_show_gallery)
 	hud.settings_pressed.connect(_show_settings)
+	hud.hw_button_pressed.connect(_on_button_pressed)
 
 	connect_dialog.visible = false
 	gallery.visible = false
@@ -109,11 +111,13 @@ func _on_connect() -> void:
 func _on_ble_connected() -> void:
 	connect_dialog.show_connected()
 	toolbar.set_connected(true)
+	hud.set_connected(true)
 
 
 func _on_ble_disconnected() -> void:
 	connect_dialog.visible = false
 	toolbar.set_connected(false)
+	hud.set_connected(false)
 	if _page_just_saved:
 		_page_just_saved = false
 		return
@@ -158,7 +162,10 @@ func _on_new_page() -> void:
 
 
 func _on_button_pressed() -> void:
-	# Called from BLE 0xCB — gesture detection
+	# Called from BLE 0xCB or GUI button — gesture detection
+	if _executing:
+		return
+	hud.flash_button()
 	_press_count += 1
 	hud.show_message("Button x%d" % _press_count)
 	if _press_count == 1:
@@ -177,15 +184,18 @@ func _on_press_timeout() -> void:
 
 
 func _execute_single_press() -> void:
+	_executing = true
 	hud.show_message("Saved")
 	_page_just_saved = true
 	ink_canvas.save_current_page()
 	ink_canvas.clear()
 	_point_count = 0
 	toolbar.set_point_count(0)
+	_executing = false
 
 
 func _execute_double_press() -> void:
+	_executing = true
 	hud.show_message("OCR + Save")
 	_page_just_saved = true
 	# Run OCR before clearing
@@ -196,6 +206,7 @@ func _execute_double_press() -> void:
 	ink_canvas.clear()
 	_point_count = 0
 	toolbar.set_point_count(0)
+	_executing = false
 
 
 func _on_sync() -> void:

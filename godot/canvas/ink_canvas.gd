@@ -24,6 +24,11 @@ func _on_resize() -> void:
 
 
 func add_point(x: int, y: int, pressure: int) -> void:
+	# Reject garbage points — outside valid Wacom range or near origin
+	if x < 0 or x > 21600 or y < 0 or y > 14700:
+		return
+	if x < 200 and y < 200:
+		return
 	if _active_stroke == null:
 		_active_stroke = _create_stroke_renderer()
 		add_child(_active_stroke)
@@ -99,6 +104,9 @@ func export_png() -> PackedByteArray:
 
 	var img := vp.get_texture().get_image()
 	var png: PackedByteArray = img.save_png_to_buffer()
+	# Debug: save to disk for inspection
+	var debug_path := ProjectSettings.globalize_path("user://last_ocr_export.png")
+	img.save_png(debug_path)
 	vp.queue_free()
 	return png
 

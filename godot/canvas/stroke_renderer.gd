@@ -25,6 +25,13 @@ func _ready() -> void:
 
 
 func add_point(sx: float, sy: float, pressure: int) -> void:
+	# Reject teleporting points — if jump > 500px it's a glitch
+	if _points.size() > 0:
+		var last := _points[-1]
+		var dx := absf(sx - last.x)
+		var dy := absf(sy - last.y)
+		if dx > 500 or dy > 500:
+			return
 	_points.append(Vector3(sx, sy, pressure))
 	_line.add_point(Vector2(sx, sy))
 	if pressure > 0:

@@ -4,6 +4,7 @@ extends HBoxContainer
 
 signal gallery_pressed()
 signal settings_pressed()
+signal hw_button_pressed()
 
 var _status_dot: ColorRect
 var _battery_label: Label
@@ -11,6 +12,8 @@ var _mode_label: Label
 var _bg_panel: Panel
 var _message_label: Label
 var _message_timer: Timer
+var _hw_button: Button
+var _hw_flash_timer: Timer
 
 const FONT_COLOR := Color(0.7, 0.7, 0.7)
 const ACCENT := Color(0.3, 0.8, 0.4)
@@ -27,11 +30,10 @@ func _ready() -> void:
 	_bg_panel.add_theme_stylebox_override("panel", bg)
 	add_child(_bg_panel)
 
-	# Status dot
+	# Status LED dot
 	_status_dot = ColorRect.new()
 	_status_dot.custom_minimum_size = Vector2(10, 10)
 	_status_dot.color = Color.GRAY
-	var dot_margin := _status_dot.get_theme_stylebox("panel")
 	add_child(_status_dot)
 
 	# Title
@@ -40,6 +42,30 @@ func _ready() -> void:
 	title.add_theme_color_override("font_color", Color.WHITE)
 	title.add_theme_font_size_override("font_size", 18)
 	add_child(title)
+
+	# Hardware button (mirrors Slate physical button)
+	_hw_button = Button.new()
+	_hw_button.text = "BTN"
+	var btn_style := StyleBoxFlat.new()
+	btn_style.bg_color = Color(0.25, 0.25, 0.25)
+	btn_style.set_corner_radius_all(6)
+	_hw_button.add_theme_stylebox_override("normal", btn_style)
+	var btn_hover := StyleBoxFlat.new()
+	btn_hover.bg_color = Color(0.35, 0.35, 0.35)
+	btn_hover.set_corner_radius_all(6)
+	_hw_button.add_theme_stylebox_override("hover", btn_hover)
+	_hw_button.add_theme_color_override("font_color", Color.WHITE)
+	_hw_button.add_theme_font_size_override("font_size", 13)
+	_hw_button.custom_minimum_size = Vector2(48, 32)
+	_hw_button.pressed.connect(func(): hw_button_pressed.emit())
+	add_child(_hw_button)
+
+	# Flash timer for button animation
+	_hw_flash_timer = Timer.new()
+	_hw_flash_timer.one_shot = true
+	_hw_flash_timer.wait_time = 0.3
+	_hw_flash_timer.timeout.connect(_on_flash_end)
+	add_child(_hw_flash_timer)
 
 	# Spacer
 	var spacer := Control.new()
@@ -131,3 +157,13 @@ func _make_icon_button(text: String, callback: Callable) -> Button:
 func show_message(text: String) -> void:
 	_message_label.text = text
 	_message_timer.start()
+
+
+func flash_button() -> void:
+	# Visual feedback when Slate hardware button is pressed
+	_hw_button.add_theme_color_override("font_color", ACCENT)
+	_hw_flash_timer.start()
+
+
+func _on_flash_end() -> void:
+	_hw_button.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
