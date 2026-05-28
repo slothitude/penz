@@ -48,9 +48,11 @@ class PenCapture:
         self.got = []
         self.connected = False
         self._pending = deque()
+        self._hover_pending = deque()  # hover points (p=0) for calibration
         self._posted = 0
         self._pen_down = False  # only true when pressure > 0
         self._stroke_ended = False
+        self._button_pressed = False  # flag for button events to forward
         self._device = None
         self._nordic_svc = None
         self._live_svc = None
@@ -63,13 +65,17 @@ class PenCapture:
         self._char_1532 = None
         self._char_ffee2 = None
         self._device_uuid = None
+        self._last_heartbeat = 0
 
     def _on_nordic(self, char, args):
         from winrt.windows.storage.streams import DataReader
         try:
             reader = DataReader.from_buffer(args.characteristic_value)
             data = bytes(reader.read_byte() for _ in range(reader.unconsumed_buffer_length))
-            self.got.append(data)
+            if len(data) >= 1 and data[0] == OP_BUTTON_PRESS:
+                self._button_pressed = True
+            else:
+                self.got.append(data)
         except Exception:
             pass
 
@@ -97,7 +103,11 @@ class PenCapture:
                                 self._pending.append((x, y, p))
                             if self.on_point:
                                 self.on_point(x, y, p)
-                        elif self._pen_down:
+                        elif not self._pen_down:
+                            # Hover: pen detected but not touching (p=0, pen was never down)
+                            if self.api_url:
+                                self._hover_pending.append((x, y))
+                        else:
                             # Pressure 0 while pen was down = lift off
                             self.canvas.pen_up()
                             self._pen_down = False
@@ -129,6 +139,47 @@ class PenCapture:
                     self._posted += len(batch)
                 except Exception:
                     pass
+
+            # Forward button press events to server
+            if self._button_pressed:
+                try:
+                    await session.post(
+                        f"{self.api_url}/stream/event",
+                        json={"type": "button"},
+                        timeout=aiohttp.ClientTimeout(total=2),
+                    )
+                except Exception:
+                    pass
+                self._button_pressed = False
+
+            # Forward hover points (pen detected, not touching)
+            if self._hover_pending:
+                hover_batch = []
+                while self._hover_pending and len(hover_batch) < 20:
+                    hover_batch.append(self._hover_pending.popleft())
+                if hover_batch:
+                    try:
+                        await session.post(
+                            f"{self.api_url}/stream/hover",
+                            json={"points": hover_batch},
+                            timeout=aiohttp.ClientTimeout(total=2),
+                        )
+                    except Exception:
+                        pass
+
+            # Heartbeat every 5s
+            now = time.time()
+            if now - self._last_heartbeat > 5.0:
+                self._last_heartbeat = now
+                try:
+                    await session.post(
+                        f"{self.api_url}/stream/heartbeat",
+                        json={"live": True, "pen_down": self._pen_down},
+                        timeout=aiohttp.ClientTimeout(total=2),
+                    )
+                except Exception:
+                    pass
+
             await asyncio.sleep(0.05)
 
     def _write_frame(self, frame):
